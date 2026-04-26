@@ -1,0 +1,22 @@
+# portly example config
+
+listen: "0.0.0.0:8080"
+# Optional, displayed in UI to help users build URLs.
+public_base_url: "http://localhost:8080"
+
+database_path: "./data/portly.db"
+
+admin:
+  username: "admin"
+  # Leave empty to auto-generate a password on first launch (printed to stdout).
+  password: ""
+
+security:
+  # Extra CIDRs allowed beyond RFC1918 + loopback + link-local.
+  allowed_cidrs: []
+  # Set to true to disable destination network checks. DANGEROUS.
+  allow_any_destination: false
+  # Additional ports to block.
+  blocked_ports: [22, 23, 25, 3306, 5432, 6379, 11211, 27017]
+  max_request_body_mb: 100
+  upstream_timeout_sec: 60

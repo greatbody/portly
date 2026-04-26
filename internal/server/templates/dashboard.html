@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>portly - dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background:#0f172a; color:#e2e8f0; margin:0; }
+  header { background:#1e293b; padding:14px 24px; display:flex; justify-content:space-between; align-items:center;
+    border-bottom:1px solid #334155;}
+  header h1 { margin:0; font-size:18px; }
+  header a { color:#94a3b8; text-decoration:none; font-size:13px; }
+  header a:hover { color:#e2e8f0; }
+  main { max-width: 1100px; margin: 24px auto; padding: 0 20px; }
+  .row { display:flex; gap:24px; align-items:flex-start; }
+  .col { flex:1; }
+  .card { background:#1e293b; border-radius:12px; padding:20px; margin-bottom:20px;
+    box-shadow: 0 6px 16px rgba(0,0,0,.25);}
+  .card h2 { margin:0 0 14px; font-size:15px; color:#cbd5e1; text-transform:uppercase; letter-spacing:.5px; }
+  table { width:100%; border-collapse:collapse; font-size:14px;}
+  th, td { text-align:left; padding:9px 8px; border-bottom:1px solid #334155;}
+  th { color:#94a3b8; font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.5px;}
+  tr:last-child td { border-bottom:none;}
+  .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600;}
+  .ok { background:#064e3b; color:#6ee7b7; }
+  .off { background:#7f1d1d; color:#fecaca; }
+  a.proxy { color:#60a5fa; text-decoration:none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;}
+  a.proxy:hover { text-decoration:underline; }
+  label { display:block; font-size:12px; color:#94a3b8; margin:10px 0 4px; }
+  input, select { box-sizing:border-box; padding:8px 10px; border-radius:7px; border:1px solid #334155;
+    background:#0f172a; color:#e2e8f0; font-size:13px; width:100%;}
+  input:focus, select:focus { outline:none; border-color:#3b82f6;}
+  button { padding:9px 16px; background:#3b82f6; color:white; border:none; border-radius:7px;
+    font-size:13px; font-weight:600; cursor:pointer; }
+  button:hover { background:#2563eb;}
+  button.danger { background:#dc2626; }
+  button.danger:hover { background:#b91c1c;}
+  button.small { padding:5px 10px; font-size:12px;}
+  .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+  .actions { display:flex; gap:6px; }
+  .empty { color:#64748b; padding:20px 0; text-align:center; font-size:13px;}
+  .hint { color:#64748b; font-size:12px; margin-top:6px;}
+</style>
+</head>
+<body>
+<header>
+  <h1>portly</h1>
+  <div><a href="/logout">Sign out</a></div>
+</header>
+<main>
+<div class="row">
+  <div class="col" style="flex:2;">
+    <div class="card">
+      <h2>Registered targets</h2>
+      <table>
+        <thead><tr>
+          <th>Slug</th><th>Name</th><th>Upstream</th><th>Status</th><th>URL</th><th></th>
+        </tr></thead>
+        <tbody id="tbody">
+          {{range .Targets}}
+          <tr data-id="{{.ID}}">
+            <td><code>{{.Slug}}</code></td>
+            <td>{{.Name}}</td>
+            <td><code>{{.Scheme}}://{{.Host}}:{{.Port}}</code></td>
+            <td>
+              {{if .Enabled}}<span class="badge ok">enabled</span>
+              {{else}}<span class="badge off">disabled</span>{{end}}
+            </td>
+            <td><a class="proxy" href="/p/{{.Slug}}/" target="_blank">/p/{{.Slug}}/</a></td>
+            <td class="actions">
+              <button class="small danger" onclick="del({{.ID}})">Delete</button>
+            </td>
+          </tr>
+          {{else}}
+          <tr><td colspan="6" class="empty">No targets yet. Add one on the right.</td></tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="col">
+    <div class="card">
+      <h2>Add a new target</h2>
+      <form id="addForm" onsubmit="return create(event)">
+        <label>Slug (URL identifier, [a-z0-9-_])</label>
+        <input name="slug" required pattern="[a-z0-9_\-]+" placeholder="grafana">
+        <label>Display name</label>
+        <input name="name" placeholder="Grafana production">
+        <div class="grid2">
+          <div>
+            <label>Scheme</label>
+            <select name="scheme"><option>http</option><option>https</option></select>
+          </div>
+          <div>
+            <label>Port</label>
+            <input name="port" type="number" min="1" max="65535" required value="80">
+          </div>
+        </div>
+        <label>Host (IP or DNS, must be in allowed networks)</label>
+        <input name="host" required placeholder="10.10.11.59">
+        <label>Description (optional)</label>
+        <input name="description">
+        <div class="hint">By default only RFC1918 / loopback are allowed. Edit config.yaml -> security.allowed_cidrs to permit more.</div>
+        <button type="submit" style="margin-top:14px;">Add target</button>
+        <div id="err" class="hint" style="color:#fca5a5;"></div>
+      </form>
+    </div>
+  </div>
+</div>
+</main>
+
+<script>
+async function create(e) {
+  e.preventDefault();
+  const f = e.target;
+  const body = {
+    slug: f.slug.value.trim(),
+    name: f.name.value.trim(),
+    scheme: f.scheme.value,
+    host: f.host.value.trim(),
+    port: parseInt(f.port.value, 10),
+    description: f.description.value.trim(),
+    enabled: true,
+  };
+  const r = await fetch('/api/targets', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  const j = await r.json();
+  if (!r.ok) { document.getElementById('err').textContent = j.error || 'failed'; return false; }
+  location.reload();
+  return false;
+}
+async function del(id) {
+  if (!confirm('Delete this target?')) return;
+  const r = await fetch('/api/targets/'+id, {method:'DELETE'});
+  if (r.ok) location.reload();
+}
+</script>
+</body>
+</html>

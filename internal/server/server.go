@@ -1,0 +1,396 @@
+package server
+
+import (
+	"embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html/template"
+	"io/fs"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/greatbody/portly/internal/auth"
+	"github.com/greatbody/portly/internal/config"
+	"github.com/greatbody/portly/internal/proxy"
+	"github.com/greatbody/portly/internal/store"
+)
+
+//go:embed templates/*.html
+var templatesFS embed.FS
+
+type Server struct {
+	Cfg   *config.Config
+	Store *store.Store
+
+	tmpl *template.Template
+
+	mu       sync.RWMutex
+	handlers map[string]*proxy.Handler // slug -> handler
+}
+
+func New(cfg *config.Config, st *store.Store) (*Server, error) {
+	sub, err := fs.Sub(templatesFS, "templates")
+	if err != nil {
+		return nil, err
+	}
+	t, err := template.ParseFS(sub, "*.html")
+	if err != nil {
+		return nil, err
+	}
+	return &Server{
+		Cfg:      cfg,
+		Store:    st,
+		tmpl:     t,
+		handlers: map[string]*proxy.Handler{},
+	}, nil
+}
+
+// Handler returns the root http.Handler.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	mux.HandleFunc("/login", s.handleLogin)
+	mux.HandleFunc("/logout", s.handleLogout)
+
+	// Reverse proxy entry — must come BEFORE root.
+	mux.HandleFunc("/p/", s.handleProxy)
+
+	// API
+	mux.Handle("/api/targets", s.requireAuth(http.HandlerFunc(s.apiTargets), true))
+	mux.Handle("/api/targets/", s.requireAuth(http.HandlerFunc(s.apiTargetByID), true))
+
+	// Dashboard / admin pages
+	mux.Handle("/", s.requireAuth(http.HandlerFunc(s.handleDashboard), false))
+
+	return logMiddleware(mux)
+}
+
+func logMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: 200}
+		next.ServeHTTP(sw, r)
+		fmt.Printf("%s %s %s -> %d %s\n",
+			time.Now().Format("15:04:05"),
+			r.Method, r.URL.RequestURI(), sw.status, time.Since(start))
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusWriter) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusWriter) Hijack() (any, any, error) {
+	if h, ok := s.ResponseWriter.(http.Hijacker); ok {
+		c, b, e := h.Hijack()
+		return c, b, e
+	}
+	return nil, nil, errors.New("hijack not supported")
+}
+
+// ---------- handlers ----------
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		next := r.URL.Query().Get("next")
+		_ = s.tmpl.ExecuteTemplate(w, "login.html", map[string]any{"Next": next, "Error": ""})
+	case http.MethodPost:
+		_ = r.ParseForm()
+		username := r.FormValue("username")
+		password := r.FormValue("password")
+		next := r.FormValue("next")
+		if next == "" {
+			next = "/"
+		}
+		if err := s.login(w, r, username, password); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = s.tmpl.ExecuteTemplate(w, "login.html", map[string]any{"Next": next, "Error": "Invalid username or password"})
+			return
+		}
+		http.Redirect(w, r, next, http.StatusFound)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	s.logout(w, r)
+	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	targets, err := s.Store.ListTargets()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	publicBase := s.Cfg.PublicBaseURL
+	_ = s.tmpl.ExecuteTemplate(w, "dashboard.html", map[string]any{
+		"Targets":    targets,
+		"PublicBase": publicBase,
+	})
+}
+
+// ---------- proxy ----------
+
+func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
+	// /p/{slug}/...
+	rest := strings.TrimPrefix(r.URL.Path, "/p/")
+	if rest == "" {
+		http.NotFound(w, r)
+		return
+	}
+	slug := rest
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		slug = rest[:i]
+	}
+	// Special case: "/p/slug" without trailing slash → redirect to "/p/slug/"
+	if !strings.HasSuffix(r.URL.Path, "/") && !strings.Contains(rest, "/") {
+		http.Redirect(w, r, "/p/"+slug+"/", http.StatusFound)
+		return
+	}
+
+	// Auth check (proxy also requires login).
+	u, _ := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login?next="+r.URL.RequestURI(), http.StatusFound)
+		return
+	}
+
+	t, err := s.Store.GetTargetBySlug(slug)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if t == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if !t.Enabled {
+		http.Error(w, "target disabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	h := s.proxyHandlerFor(t)
+	h.ServeHTTP(w, r)
+}
+
+func (s *Server) proxyHandlerFor(t *store.Target) *proxy.Handler {
+	mount := "/p/" + t.Slug
+	s.mu.RLock()
+	if h, ok := s.handlers[t.Slug]; ok && h.Target.UpdatedAt == t.UpdatedAt {
+		s.mu.RUnlock()
+		return h
+	}
+	s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h, _ := proxy.New(t, mount, time.Duration(s.Cfg.Security.UpstreamTimeoutSec)*time.Second)
+	s.handlers[t.Slug] = h
+	return h
+}
+
+func (s *Server) invalidateHandler(slug string) {
+	s.mu.Lock()
+	delete(s.handlers, slug)
+	s.mu.Unlock()
+}
+
+// ---------- API ----------
+
+type targetDTO struct {
+	ID          int64  `json:"id"`
+	Slug        string `json:"slug"`
+	Name        string `json:"name"`
+	Scheme      string `json:"scheme"`
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
+}
+
+func toDTO(t *store.Target) targetDTO {
+	return targetDTO{
+		ID: t.ID, Slug: t.Slug, Name: t.Name, Scheme: t.Scheme,
+		Host: t.Host, Port: t.Port, Description: t.Description, Enabled: t.Enabled,
+	}
+}
+
+func (s *Server) apiTargets(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ts, err := s.Store.ListTargets()
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		out := make([]targetDTO, 0, len(ts))
+		for _, t := range ts {
+			out = append(out, toDTO(t))
+		}
+		writeJSON(w, 200, out)
+	case http.MethodPost:
+		var in targetDTO
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateInput(&in); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateTarget(s.Cfg, in.Host, in.Port); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		t := &store.Target{
+			Slug: in.Slug, Name: in.Name, Scheme: in.Scheme, Host: in.Host,
+			Port: in.Port, Description: in.Description, Enabled: in.Enabled,
+		}
+		out, err := s.Store.CreateTarget(t)
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, toDTO(out))
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) apiTargetByID(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimPrefix(r.URL.Path, "/api/targets/")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": "bad id"})
+		return
+	}
+	t, err := s.Store.GetTarget(id)
+	if err != nil || t == nil {
+		writeJSON(w, 404, map[string]string{"error": "not found"})
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var in targetDTO
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateInput(&in); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateTarget(s.Cfg, in.Host, in.Port); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		t.Slug = in.Slug
+		t.Name = in.Name
+		t.Scheme = in.Scheme
+		t.Host = in.Host
+		t.Port = in.Port
+		t.Description = in.Description
+		t.Enabled = in.Enabled
+		if err := s.Store.UpdateTarget(t); err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		s.invalidateHandler(t.Slug)
+		writeJSON(w, 200, toDTO(t))
+	case http.MethodDelete:
+		if err := s.Store.DeleteTarget(id); err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		s.invalidateHandler(t.Slug)
+		writeJSON(w, 200, map[string]string{"status": "ok"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func validateInput(in *targetDTO) error {
+	in.Slug = strings.TrimSpace(in.Slug)
+	in.Name = strings.TrimSpace(in.Name)
+	in.Scheme = strings.ToLower(strings.TrimSpace(in.Scheme))
+	in.Host = strings.TrimSpace(in.Host)
+	if in.Slug == "" {
+		return errors.New("slug is required")
+	}
+	for _, r := range in.Slug {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+			return errors.New("slug must be [a-z0-9-_]")
+		}
+	}
+	if in.Name == "" {
+		in.Name = in.Slug
+	}
+	if in.Scheme != "http" && in.Scheme != "https" {
+		return errors.New("scheme must be http or https")
+	}
+	if in.Host == "" {
+		return errors.New("host is required")
+	}
+	if in.Port <= 0 || in.Port > 65535 {
+		return errors.New("port must be 1..65535")
+	}
+	return nil
+}
+
+// EnsureAdmin creates an admin user if none exists. Returns the password (plaintext)
+// only if it was just generated; otherwise empty string.
+func (s *Server) EnsureAdmin() (username, generatedPassword string, err error) {
+	n, err := s.Store.CountUsers()
+	if err != nil {
+		return "", "", err
+	}
+	if n > 0 {
+		return s.Cfg.Admin.Username, "", nil
+	}
+	username = s.Cfg.Admin.Username
+	if username == "" {
+		username = "admin"
+	}
+	password := s.Cfg.Admin.Password
+	if password == "" {
+		password, err = auth.RandomPassword()
+		if err != nil {
+			return "", "", err
+		}
+		generatedPassword = password
+	}
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := s.Store.CreateUser(username, hash); err != nil {
+		return "", "", err
+	}
+	return username, generatedPassword, nil
+}
