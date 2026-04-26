@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -79,19 +81,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			rw.WriteHeader(http.StatusBadGateway)
 			_, _ = fmt.Fprintf(rw, "portly: upstream error: %v", err)
 		},
-		FlushInterval: 100 * time.Millisecond,
-		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   10 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			ResponseHeaderTimeout: h.UpstreamTimeout,
-			MaxIdleConns:          50,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
+		FlushInterval: -1, // immediate flush; required for SSE / streaming, harmless otherwise
+		Transport:     http.DefaultTransport,
 	}
 	rp.ServeHTTP(w, r)
 }
@@ -111,6 +102,12 @@ func schemeFromRequest(r *http.Request) string {
 func (h *Handler) modifyResponse(resp *http.Response) error {
 	prefix := h.MountPrefix
 	if prefix == "" {
+		return nil
+	}
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+
+	// Streaming responses (SSE, etc): touch headers only, never read body.
+	if strings.Contains(ct, "text/event-stream") {
 		return nil
 	}
 
@@ -134,8 +131,7 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 	}
 
 	// 3. Rewrite HTML bodies: inject <base href="/p/slug/"> after <head>.
-	ct := resp.Header.Get("Content-Type")
-	if !strings.Contains(strings.ToLower(ct), "text/html") {
+	if !strings.Contains(ct, "text/html") {
 		return nil
 	}
 
@@ -188,24 +184,104 @@ func readBody(resp *http.Response) ([]byte, string, error) {
 	}
 }
 
-// rewriteHTML inserts a <base href="prefix/"> tag right after <head ...> so that
-// relative URLs work, and rewrites root-absolute href/src attributes.
+// rewriteHTML rewrites root-absolute attribute URLs to include the mount prefix and
+// injects a runtime shim that patches fetch / XHR / WebSocket / EventSource so that
+// SPA JavaScript that builds absolute URLs at runtime also stays inside the mount.
 func rewriteHTML(body []byte, prefix string) []byte {
 	prefixSlash := prefix + "/"
+
+	// 1. Rewrite root-absolute attributes: src="/x", href="/x", action="/x", srcset, content
+	//    Skip protocol-relative ("//x") and double-slashes inside data: URIs.
+	attrRe := regexp.MustCompile(`(\s(?:src|href|action|poster|formaction|data-src|data-href)\s*=\s*)("|')/([^"'/])`)
+	body = attrRe.ReplaceAll(body, []byte(`${1}${2}`+prefixSlash+`${3}`))
+
+	// srcset: comma-separated "/path size, /path2 size2"
+	srcsetRe := regexp.MustCompile(`(\ssrcset\s*=\s*"|\ssrcset\s*=\s*')([^"']+)(['"])`)
+	body = srcsetRe.ReplaceAllFunc(body, func(m []byte) []byte {
+		sub := srcsetRe.FindSubmatch(m)
+		parts := strings.Split(string(sub[2]), ",")
+		for i, p := range parts {
+			tp := strings.TrimSpace(p)
+			if strings.HasPrefix(tp, "/") && !strings.HasPrefix(tp, "//") {
+				parts[i] = " " + prefixSlash + strings.TrimPrefix(tp, "/")
+			}
+		}
+		return []byte(string(sub[1]) + strings.Join(parts, ",") + string(sub[3]))
+	})
+
+	// 2. Inject shim + <base> right after <head ...> (or prepend if no head).
+	shim := buildShim(prefixSlash)
 	baseTag := []byte(fmt.Sprintf(`<base href="%s">`, prefixSlash))
+	insert := append(baseTag, shim...)
 
 	lower := bytes.ToLower(body)
 	if idx := bytes.Index(lower, []byte("<head")); idx >= 0 {
-		// find end of opening tag
 		if end := bytes.IndexByte(body[idx:], '>'); end >= 0 {
 			insertAt := idx + end + 1
-			body = append(body[:insertAt], append(baseTag, body[insertAt:]...)...)
+			body = append(body[:insertAt], append(insert, body[insertAt:]...)...)
 		}
 	} else {
-		// no head: prepend
-		body = append(baseTag, body...)
+		body = append(insert, body...)
 	}
 	return body
+}
+
+// buildShim returns a tiny inline <script> that monkey-patches the browser APIs
+// most likely to leak out of the mount prefix at runtime: fetch, XHR.open,
+// WebSocket, EventSource, and history.pushState/replaceState.
+func buildShim(prefixSlash string) []byte {
+	// prefixSlash already ends with "/"
+	js := `<script>(function(){
+var P=` + jsString(prefixSlash) + `;
+function fix(u){
+  if(typeof u!=="string")return u;
+  if(u.indexOf(P)===0)return u;
+  if(u.length>0&&u.charAt(0)==="/"&&(u.length===1||u.charAt(1)!=="/"))return P+u.substring(1);
+  return u;
+}
+function fixWS(u){
+  if(typeof u!=="string")return u;
+  // ws(s)://host/x  -> keep host but ensure path starts with P
+  var m=u.match(/^(wss?:\/\/[^\/]+)(\/.*)?$/);
+  if(m){
+    var path=m[2]||"/";
+    if(path.indexOf(P)!==0){
+      path=P+path.replace(/^\//,"");
+    }
+    return m[1]+path;
+  }
+  if(u.charAt(0)==="/")return P+u.substring(1);
+  return u;
+}
+var of=window.fetch;
+if(of){window.fetch=function(i,o){
+  if(typeof i==="string")i=fix(i);
+  else if(i&&i.url){try{i=new Request(fix(i.url),i)}catch(e){}}
+  return of.call(this,i,o);
+};}
+var oo=XMLHttpRequest.prototype.open;
+XMLHttpRequest.prototype.open=function(m,u){
+  arguments[1]=fix(u);return oo.apply(this,arguments);
+};
+var OW=window.WebSocket;
+if(OW){window.WebSocket=function(u,p){return p===undefined?new OW(fixWS(u)):new OW(fixWS(u),p);};
+  window.WebSocket.prototype=OW.prototype;
+  for(var k in OW)try{window.WebSocket[k]=OW[k]}catch(e){}
+}
+var ES=window.EventSource;
+if(ES){window.EventSource=function(u,c){return c===undefined?new ES(fix(u)):new ES(fix(u),c);};
+  window.EventSource.prototype=ES.prototype;
+}
+var ps=history.pushState,rs=history.replaceState;
+history.pushState=function(s,t,u){return ps.call(this,s,t,u==null?u:fix(u));};
+history.replaceState=function(s,t,u){return rs.call(this,s,t,u==null?u:fix(u));};
+})();</script>`
+	return []byte(js)
+}
+
+func jsString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // rewriteLocation rewrites a redirect Location header so it stays inside the mount.

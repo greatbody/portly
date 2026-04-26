@@ -1,13 +1,16 @@
 package server
 
 import (
+	"bufio"
 	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,12 +73,70 @@ func (s *Server) Handler() http.Handler {
 	// Dashboard / admin pages
 	mux.Handle("/", s.requireAuth(http.HandlerFunc(s.handleDashboard), false))
 
-	return logMiddleware(mux)
+	return s.refererRescue(logMiddleware(mux))
+}
+
+// refererRescue: if a request comes in WITHOUT the /p/{slug}/ prefix but its Referer
+// shows it originated from a /p/{slug}/ page, internally rewrite the URL so the
+// proxy route can handle it. This catches SPA-generated absolute URLs (/assets/x.js,
+// /api/foo) that even the JS shim might miss (e.g. inline <link rel=preload> already
+// fired before the shim parsed, or hard-coded module imports).
+func (s *Server) refererRescue(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// only rescue if not already under /p/, /api/, /login, /logout, /healthz, /
+		p := r.URL.Path
+		if strings.HasPrefix(p, "/p/") || p == "/" || p == "/login" || p == "/logout" ||
+			p == "/healthz" || strings.HasPrefix(p, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ref := r.Header.Get("Referer")
+		if ref == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		u, err := url.Parse(ref)
+		if err != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		rp := u.Path
+		if !strings.HasPrefix(rp, "/p/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// extract slug
+		rest := strings.TrimPrefix(rp, "/p/")
+		slug := rest
+		if i := strings.IndexByte(rest, '/'); i >= 0 {
+			slug = rest[:i]
+		}
+		if slug == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Rewrite request path
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = "/p/" + slug + p
+		if r2.URL.RawPath != "" {
+			r2.URL.RawPath = "/p/" + slug + r2.URL.RawPath
+		}
+		next.ServeHTTP(w, r2)
+	})
 }
 
 func logMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		// Don't wrap proxy responses: doing so loses the http.Flusher / Hijacker
+		// type assertion that ReverseProxy needs for SSE / WebSocket.
+		if strings.HasPrefix(r.URL.Path, "/p/") {
+			next.ServeHTTP(w, r)
+			fmt.Printf("%s %s %s -> proxied %s\n",
+				time.Now().Format("15:04:05"),
+				r.Method, r.URL.RequestURI(), time.Since(start))
+			return
+		}
 		sw := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(sw, r)
 		fmt.Printf("%s %s %s -> %d %s\n",
@@ -94,10 +155,19 @@ func (s *statusWriter) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
-func (s *statusWriter) Hijack() (any, any, error) {
+// Flush forwards to the underlying writer when possible. ReverseProxy uses this
+// for streaming (SSE, etc) when FlushInterval = -1.
+func (s *statusWriter) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack forwards to the underlying writer when possible (needed for WebSocket
+// upgrades performed by httputil.ReverseProxy).
+func (s *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if h, ok := s.ResponseWriter.(http.Hijacker); ok {
-		c, b, e := h.Hijack()
-		return c, b, e
+		return h.Hijack()
 	}
 	return nil, nil, errors.New("hijack not supported")
 }
