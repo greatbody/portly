@@ -86,10 +86,11 @@ func (s *Server) Handler() http.Handler {
 }
 
 // refererRescue: if a request comes in WITHOUT the /p/{slug}/ prefix but its Referer
+// (or, as a last resort, a portly_last_slug cookie set by previous proxy responses)
 // shows it originated from a /p/{slug}/ page, internally rewrite the URL so the
 // proxy route can handle it. This catches SPA-generated absolute URLs (/assets/x.js,
-// /api/foo) that even the JS shim might miss (e.g. inline <link rel=preload> already
-// fired before the shim parsed, or hard-coded module imports).
+// /api/foo) that even the JS shim might miss — for example ES module dynamic
+// import(), which does not send a Referer header for module-typed scripts.
 func (s *Server) refererRescue(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// only rescue if not already under /p/, /api/, /login, /logout, /healthz, /
@@ -99,26 +100,11 @@ func (s *Server) refererRescue(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		ref := r.Header.Get("Referer")
-		if ref == "" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		u, err := url.Parse(ref)
-		if err != nil {
-			next.ServeHTTP(w, r)
-			return
-		}
-		rp := u.Path
-		if !strings.HasPrefix(rp, "/p/") {
-			next.ServeHTTP(w, r)
-			return
-		}
-		// extract slug
-		rest := strings.TrimPrefix(rp, "/p/")
-		slug := rest
-		if i := strings.IndexByte(rest, '/'); i >= 0 {
-			slug = rest[:i]
+		slug := slugFromReferer(r.Header.Get("Referer"))
+		if slug == "" {
+			if c, err := r.Cookie("portly_last_slug"); err == nil {
+				slug = c.Value
+			}
 		}
 		if slug == "" {
 			next.ServeHTTP(w, r)
@@ -132,6 +118,26 @@ func (s *Server) refererRescue(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r2)
 	})
+}
+
+// slugFromReferer extracts the slug from a Referer URL like /p/{slug}/...
+func slugFromReferer(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	u, err := url.Parse(ref)
+	if err != nil {
+		return ""
+	}
+	rp := u.Path
+	if !strings.HasPrefix(rp, "/p/") {
+		return ""
+	}
+	rest := strings.TrimPrefix(rp, "/p/")
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		return rest[:i]
+	}
+	return rest
 }
 
 func logMiddleware(next http.Handler) http.Handler {
@@ -268,6 +274,18 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "target disabled", http.StatusServiceUnavailable)
 		return
 	}
+
+	// Stash the slug in a cookie so refererRescue can fall back to it when
+	// browser-issued requests (e.g. ES module dynamic import, web workers,
+	// some <link rel=preload>) arrive without a Referer header.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "portly_last_slug",
+		Value:    t.Slug,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   3600,
+	})
 
 	h := s.proxyHandlerFor(t)
 	h.ServeHTTP(w, r)
