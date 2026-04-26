@@ -317,8 +317,28 @@ cleanStorage(localStorage);cleanStorage(sessionStorage);
 
 var of=window.fetch;
 if(of){window.fetch=function(i,o){
-  if(typeof i==="string")i=fix(i);
-  else if(i&&i.url){try{i=new Request(fix(i.url),i)}catch(e){}}
+  if(typeof i==="string")return of.call(this,fix(i),o);
+  if(i&&typeof i.url==="string"){
+    var fixed=fix(i.url);
+    if(fixed===i.url)return of.call(this,i,o);
+    // URL changed: must build a new Request. Avoid passing the original
+    // Request as init — that re-uses its ReadableStream body and turns
+    // the call into a "fetch upload streaming" request, which Chrome
+    // will only send over HTTP/2/3 (causing ERR_ALPN_NEGOTIATION_FAILED
+    // against plain HTTP/1.1 servers like portly). Materialize the body
+    // first so the rewritten Request carries a buffer instead.
+    var hasBody=i.method&&i.method!=="GET"&&i.method!=="HEAD";
+    var bodyP=hasBody?i.clone().arrayBuffer().catch(function(){return undefined;}):Promise.resolve(undefined);
+    return bodyP.then(function(buf){
+      var init={
+        method:i.method,headers:i.headers,mode:i.mode,credentials:i.credentials,
+        cache:i.cache,redirect:i.redirect,referrer:i.referrer,referrerPolicy:i.referrerPolicy,
+        integrity:i.integrity,signal:i.signal
+      };
+      if(buf!==undefined)init.body=buf;
+      return of.call(window,new Request(fixed,init),o);
+    });
+  }
   return of.call(this,i,o);
 };}
 var oo=XMLHttpRequest.prototype.open;
