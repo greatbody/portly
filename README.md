@@ -13,6 +13,8 @@ http(s)://your-domain/p/{slug}/
 - Path-based reverse proxy: `/p/{slug}/*`
 - WebSocket passthrough
 - HTML / Cookie / Redirect rewriting so apps work behind a sub-path
+- **SPA Referer Rescue**: Transparently rewrites absolute URLs and dynamic imports using Referer headers and cookies
+- **SSRF Protection**: Restricts upstream proxy targets to private network IPs / allowed CIDRs and blocks sensitive ports
 - Single admin login (session cookie, argon2id password hashing)
 - Web admin panel to add / edit / delete / enable targets
 - SQLite single-file storage
