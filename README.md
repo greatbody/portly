@@ -54,3 +54,17 @@ sudo systemctl daemon-reload && sudo systemctl enable --now portly
 ## License
 
 MIT
+
+## Current dev instance (this machine)
+
+For local verification, the dev instance shipped with `config.yaml` listens on:
+
+| | |
+|---|---|
+| Listen | `0.0.0.0:18080` |
+| Loopback URL | http://127.0.0.1:18080/ |
+| LAN URL | http://10.10.11.59:18080/ |
+| Username | `admin` |
+| Password | `portly-admin-2026` |
+
+> Change `admin.password` in `config.yaml` before exposing publicly.
