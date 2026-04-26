@@ -1,0 +1,19 @@
+[Unit]
+Description=portly reverse proxy gateway
+After=network.target
+
+[Service]
+Type=simple
+# Replace with your install user/path
+User=portly
+Group=portly
+WorkingDirectory=/opt/portly
+ExecStart=/opt/portly/portly --config /opt/portly/config.yaml
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

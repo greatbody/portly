@@ -1,0 +1,9 @@
+listen: "0.0.0.0:18080"
+public_base_url: "http://127.0.0.1:18080"
+database_path: "./data/portly.db"
+admin:
+  username: "admin"
+  password: "portly-admin-2026"
+security:
+  allowed_cidrs: []
+  allow_any_destination: false

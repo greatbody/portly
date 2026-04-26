@@ -23,10 +23,23 @@ http(s)://your-domain/p/{slug}/
 
 ```bash
 go build -o portly ./cmd/portly
+cp config.example.yaml config.yaml   # edit listen / admin password
 ./portly --config config.yaml
 ```
 
-Then open `http://<server-ip>:8080/` and log in with the credentials printed on first start (or those set in `config.yaml`).
+Open `http://<server-ip>:<port>/` and log in. If `admin.password` is empty in the
+config, a random password is generated and printed to stdout on first launch.
+
+### systemd
+
+A unit file is provided in `systemd/portly.service`. Adjust paths and user, then:
+
+```bash
+sudo cp portly /opt/portly/portly
+sudo cp config.yaml /opt/portly/config.yaml
+sudo cp systemd/portly.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now portly
+```
 
 ## URL scheme
 
