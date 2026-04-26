@@ -1,8 +1,23 @@
 /portly
+*.exe
+
+# Go test and coverage
+*.test
+*.out
+coverage.txt
+
+# Go vendor
+/vendor/
+
+# Local configuration (to prevent accidental secret commits)
+config.yaml
+
 /data/
 *.db
 *.db-journal
 *.log
+
+# OS / Editor
 .DS_Store
 .idea/
 .vscode/
