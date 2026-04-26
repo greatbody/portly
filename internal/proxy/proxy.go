@@ -243,26 +243,78 @@ func buildShim(prefixSlash string) []byte {
 	// prefixSlash already ends with "/"
 	js := `<script>(function(){
 var P=` + jsString(prefixSlash) + `;
+var ORIGIN=location.origin;
+function toLocal(u){
+  // Absolute URL pointing at some other host: capture path+query+hash and
+  // re-anchor to current origin under the mount prefix. This is essential
+  // for SPAs that hardcode an upstream baseUrl (e.g. http://localhost:4096
+  // or http://10.x.x.x:port) into JS or stash one in localStorage.
+  try{
+    var url=new URL(u);
+    var path=url.pathname||"/";
+    if(path.indexOf(P)!==0)path=P+path.replace(/^\//,"");
+    return ORIGIN+path+(url.search||"")+(url.hash||"");
+  }catch(e){return u;}
+}
 function fix(u){
   if(typeof u!=="string")return u;
+  if(u.indexOf("data:")===0||u.indexOf("blob:")===0||u.indexOf("javascript:")===0)return u;
+  // Absolute http(s) URL
+  if(/^https?:\/\//i.test(u)){
+    if(u.indexOf(ORIGIN+P)===0)return u; // already correct
+    return toLocal(u);
+  }
+  // Protocol-relative //host/x
+  if(u.indexOf("//")===0)return toLocal(location.protocol+u);
+  // Already prefixed
   if(u.indexOf(P)===0)return u;
-  if(u.length>0&&u.charAt(0)==="/"&&(u.length===1||u.charAt(1)!=="/"))return P+u.substring(1);
+  // Root-absolute /x
+  if(u.length>0&&u.charAt(0)==="/")return P+u.substring(1);
   return u;
 }
 function fixWS(u){
   if(typeof u!=="string")return u;
-  // ws(s)://host/x  -> keep host but ensure path starts with P
-  var m=u.match(/^(wss?:\/\/[^\/]+)(\/.*)?$/);
+  var wsScheme=location.protocol==="https:"?"wss:":"ws:";
+  var wsBase=wsScheme+"//"+location.host;
+  // Absolute ws(s)://host/x: drop original host, use current host + prefix
+  var m=u.match(/^wss?:\/\/[^\/]+(\/.*)?$/i);
   if(m){
-    var path=m[2]||"/";
-    if(path.indexOf(P)!==0){
-      path=P+path.replace(/^\//,"");
-    }
-    return m[1]+path;
+    var path=m[1]||"/";
+    if(path.indexOf(P)!==0)path=P+path.replace(/^\//,"");
+    return wsBase+path;
   }
-  if(u.charAt(0)==="/")return P+u.substring(1);
+  // http(s)://host/x — promote to ws(s)
+  if(/^https?:\/\//i.test(u)){
+    try{var url=new URL(u);var path=url.pathname||"/";
+      if(path.indexOf(P)!==0)path=P+path.replace(/^\//,"");
+      return wsBase+path+(url.search||"");
+    }catch(e){}
+  }
+  if(u.charAt(0)==="/")return wsBase+P+u.substring(1);
   return u;
 }
+// One-time cleanup: remove localStorage / sessionStorage entries whose value
+// looks like a hardcoded URL pointing at a different host. SPAs (e.g.
+// OpenCode) often persist the user-selected upstream base URL there, which
+// will keep failing once the user switches to accessing via portly.
+function cleanStorage(s){
+  try{
+    var rm=[];
+    for(var i=0;i<s.length;i++){
+      var k=s.key(i);var v=s.getItem(k);
+      if(typeof v!=="string")continue;
+      // crude heuristic: contains http(s)://host[:port] that isn't current origin
+      var matches=v.match(/https?:\/\/[a-zA-Z0-9_.\-]+(:\d+)?/g);
+      if(!matches)continue;
+      var bad=matches.some(function(m){return m!==ORIGIN&&m.indexOf(ORIGIN)!==0;});
+      if(bad)rm.push(k);
+    }
+    rm.forEach(function(k){try{s.removeItem(k);}catch(e){}});
+    if(rm.length)console.info("[portly] cleaned",rm.length,"stale URL entries from",s===localStorage?"localStorage":"sessionStorage",rm);
+  }catch(e){}
+}
+cleanStorage(localStorage);cleanStorage(sessionStorage);
+
 var of=window.fetch;
 if(of){window.fetch=function(i,o){
   if(typeof i==="string")i=fix(i);
