@@ -254,11 +254,16 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth check (proxy also requires login).
-	u, _ := s.currentUser(r)
-	if u == nil {
-		http.Redirect(w, r, "/login?next="+r.URL.RequestURI(), http.StatusFound)
-		return
+	// Auth check (proxy also requires login). Exception: CORS preflight
+	// (OPTIONS) requests do not carry credentials per the Fetch spec, so
+	// requiring auth would always fail and the browser would block the real
+	// request. Forward preflights through to the upstream unauthenticated.
+	if r.Method != http.MethodOptions {
+		u, _ := s.currentUser(r)
+		if u == nil {
+			http.Redirect(w, r, "/login?next="+r.URL.RequestURI(), http.StatusFound)
+			return
+		}
 	}
 
 	t, err := s.Store.GetTargetBySlug(slug)
