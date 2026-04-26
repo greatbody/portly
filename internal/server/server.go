@@ -60,6 +60,15 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 
+	// 1x1 transparent PNG so browser favicon requests don't litter logs with 404.
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		// 1x1 transparent PNG, base64 of 67 bytes
+		const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe\x02\xfe\xa3\x35\x81\x84\x00\x00\x00\x00IEND\xaeB`\x82"
+		_, _ = w.Write([]byte(png))
+	})
+
 	mux.HandleFunc("/login", s.handleLogin)
 	mux.HandleFunc("/logout", s.handleLogout)
 
@@ -86,7 +95,7 @@ func (s *Server) refererRescue(next http.Handler) http.Handler {
 		// only rescue if not already under /p/, /api/, /login, /logout, /healthz, /
 		p := r.URL.Path
 		if strings.HasPrefix(p, "/p/") || p == "/" || p == "/login" || p == "/logout" ||
-			p == "/healthz" || strings.HasPrefix(p, "/api/") {
+			p == "/healthz" || p == "/favicon.ico" || strings.HasPrefix(p, "/api/") {
 			next.ServeHTTP(w, r)
 			return
 		}

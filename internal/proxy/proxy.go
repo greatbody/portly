@@ -118,6 +118,16 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 		}
 	}
 
+	// 1b. Strip CSP / frame-busting headers so our injected shim can run and
+	// so the app stays usable behind the mount prefix. portly is itself the
+	// trust boundary; the upstream's CSP no longer matches the served origin.
+	resp.Header.Del("Content-Security-Policy")
+	resp.Header.Del("Content-Security-Policy-Report-Only")
+	resp.Header.Del("X-Frame-Options")
+	resp.Header.Del("Cross-Origin-Opener-Policy")
+	resp.Header.Del("Cross-Origin-Embedder-Policy")
+	resp.Header.Del("Cross-Origin-Resource-Policy")
+
 	// 2. Rewrite Set-Cookie Path attribute.
 	if cookies := resp.Header.Values("Set-Cookie"); len(cookies) > 0 {
 		newCookies := make([]string, 0, len(cookies))
