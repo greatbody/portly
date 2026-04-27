@@ -1,0 +1,12 @@
+.git
+.github
+data
+*.db
+*.db-shm
+*.db-wal
+portly
+config.yaml
+README.md
+systemd
+Dockerfile
+.dockerignore
