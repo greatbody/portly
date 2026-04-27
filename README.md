@@ -32,6 +32,38 @@ cp config.example.yaml config.yaml   # edit listen / admin password
 Open `http://<server-ip>:<port>/` and log in. If `admin.password` is empty in the
 config, a random password is generated and printed to stdout on first launch.
 
+### Docker
+
+Multi-arch images are published to GitHub Container Registry on every push to
+`main` and on `v*` tags. Supported platforms: `linux/amd64`, `linux/arm64`,
+`linux/arm/v7`, `linux/ppc64le`, `linux/s390x`.
+
+```bash
+# Pull
+docker pull ghcr.io/greatbody/portly:latest
+
+# Run (mount your config read-only and a named volume for the SQLite DB)
+docker run -d --name portly \
+  -p 8080:8080 \
+  -v $(pwd)/config.yaml:/app/config.yaml:ro \
+  -v portly-data:/data \
+  ghcr.io/greatbody/portly:latest
+```
+
+Set `database_path: /data/portly.db` in `config.yaml` so the database lands on
+the persistent volume. The image runs as a non-root user (`65532`); if you
+bind-mount a host directory for `/data`, `chown 65532:65532` it first.
+
+Build locally:
+
+```bash
+docker build -t portly:dev .
+```
+
+The image is based on `gcr.io/distroless/static-debian12:nonroot` (~2 MB) plus
+the static Go binary, and every CI build is scanned with Trivy v0.70.0 for
+fixable HIGH/CRITICAL CVEs before publish.
+
 ### systemd
 
 A unit file is provided in `systemd/portly.service`. Adjust paths and user, then:
