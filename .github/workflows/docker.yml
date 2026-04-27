@@ -60,34 +60,34 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Scan image with Trivy ${{ env.TRIVY_VERSION }}
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: portly:scan
-          format: table
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-        env:
-          TRIVY_VERSION: ${{ env.TRIVY_VERSION }}
+      - name: Install Trivy ${{ env.TRIVY_VERSION }}
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sudo sh -s -- -b /usr/local/bin "${TRIVY_VERSION}"
+          trivy --version
 
-      - name: Trivy SARIF report
-        if: always()
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: portly:scan
-          format: sarif
-          output: trivy-results.sarif
-          ignore-unfixed: true
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-        env:
-          TRIVY_VERSION: ${{ env.TRIVY_VERSION }}
+      - name: Scan image with Trivy
+        run: |
+          trivy image \
+            --scanners vuln \
+            --exit-code 1 \
+            --ignore-unfixed \
+            --severity HIGH,CRITICAL \
+            portly:scan
 
       - name: Upload SARIF to GitHub Security
         if: always() && github.event_name != 'pull_request'
-        uses: github/codeql-action/upload-sarif@v3
+        run: |
+          trivy image \
+            --scanners vuln \
+            --ignore-unfixed \
+            --severity HIGH,CRITICAL \
+            --format sarif \
+            --output trivy-results.sarif \
+            portly:scan || true
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always() && github.event_name != 'pull_request' && hashFiles('trivy-results.sarif') != ''
         with:
           sarif_file: trivy-results.sarif
 
