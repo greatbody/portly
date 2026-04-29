@@ -52,7 +52,13 @@ docker run -d --name portly \
 
 #### Docker Compose
 
-For a simpler setup, use Docker Compose:
+For the quickest setup, run our one-liner installer:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/greatbody/portly/main/portly-compose/install.sh)
+```
+
+Or manually:
 
 ```bash
 cd portly-compose

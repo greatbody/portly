@@ -2,7 +2,15 @@
 
 Example Docker Compose setup for running portly with persistent storage.
 
-## Quick Start
+## One-Line Install
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/greatbody/portly/main/portly-compose/install.sh)
+```
+
+This downloads `compose.yaml` and `config.example.yaml`, then starts Portly immediately.
+
+## Manual Quick Start
 
 1. Copy your `config.yaml` to this directory:
    ```bash
