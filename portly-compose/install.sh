@@ -41,11 +41,21 @@ echo "🚀 Starting Portly..."
 cd "$PORTLY_DIR"
 docker compose up -d
 
+# Wait for container to be ready and capture logs
+echo ""
+echo "⏳ Waiting for Portly to start..."
+sleep 3
+
+# Show startup logs (which include the auto-generated password if applicable)
+echo ""
+echo "📋 Startup logs:"
+docker compose logs portly
+
 echo ""
 echo "✅ Portly installed and started!"
 echo ""
 echo "Access the web interface at: http://localhost:8080"
 echo "Config file: $CONFIG_FILE"
-echo "View logs: docker compose logs -f"
+echo "View logs: docker compose logs -f portly"
 echo ""
 echo "To stop: docker compose down"
