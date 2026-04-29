@@ -33,23 +33,18 @@ curl -fsSL https://raw.githubusercontent.com/greatbody/portly/main/portly-compos
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "📥 Downloading config.example.yaml..."
     curl -fsSL https://raw.githubusercontent.com/greatbody/portly/main/portly-compose/config.example.yaml -o "$CONFIG_FILE"
-    echo "⚠️  Edit $CONFIG_FILE to customize settings before running."
+
+    # Generate a random password and inject it into config.yaml
+    ADMIN_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9!@#%^&*' < /dev/urandom | head -c 20)
+    sed -i.bak "s/^  password: \"\"$/  password: \"${ADMIN_PASSWORD}\"/" "$CONFIG_FILE" && rm -f "${CONFIG_FILE}.bak"
+    echo "🔑 Generated admin password: ${ADMIN_PASSWORD}"
+    echo "   (also saved in $CONFIG_FILE)"
 fi
 
 # Start the service
 echo "🚀 Starting Portly..."
 cd "$PORTLY_DIR"
 docker compose up -d
-
-# Wait for container to be ready and capture logs
-echo ""
-echo "⏳ Waiting for Portly to start..."
-sleep 3
-
-# Show startup logs (which include the auto-generated password if applicable)
-echo ""
-echo "📋 Startup logs:"
-docker compose logs portly
 
 echo ""
 echo "✅ Portly installed and started!"
