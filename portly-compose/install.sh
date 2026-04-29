@@ -4,7 +4,7 @@ set -e
 # Portly one-line installer
 # Run with: bash <(curl -fsSL https://raw.githubusercontent.com/greatbody/portly/main/portly-compose/install.sh)
 
-PORTLY_DIR="${PORTLY_DIR:-.}"
+PORTLY_DIR="${PORTLY_DIR:-portly}"
 COMPOSE_FILE="$PORTLY_DIR/compose.yaml"
 CONFIG_FILE="$PORTLY_DIR/config.yaml"
 
