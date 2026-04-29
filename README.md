@@ -50,6 +50,20 @@ docker run -d --name portly \
   ghcr.io/greatbody/portly:latest
 ```
 
+#### Docker Compose
+
+For a simpler setup, use Docker Compose:
+
+```bash
+cd portly-compose
+cp config.example.yaml config.yaml  # edit as needed
+docker compose up -d
+```
+
+See [`portly-compose/`](portly-compose/) for the example `compose.yaml` and configuration template.
+
+#### Configuration
+
 Set `database_path: /data/portly.db` in `config.yaml` so the database lands on
 the persistent volume. The image runs as a non-root user (`65532`); if you
 bind-mount a host directory for `/data`, `chown 65532:65532` it first.

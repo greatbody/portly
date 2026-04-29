@@ -1,14 +1,16 @@
 # portly example config
+# Copy this to config.yaml and customize for your environment
 
 listen: "0.0.0.0:8080"
 # Optional, displayed in UI to help users build URLs.
 public_base_url: "http://localhost:8080"
 
-database_path: "./data/portly.db"
+database_path: "/data/portly.db"
 
 admin:
   username: "admin"
-  # Leave empty to auto-generate a password on first launch (printed to stdout).
+  # Leave empty to auto-generate a password on first launch (printed to logs).
+  # When running in Docker, check logs with: docker compose logs portly
   password: ""
 
 security:

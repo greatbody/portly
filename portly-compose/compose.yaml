@@ -1,0 +1,17 @@
+services:
+  portly:
+    image: ghcr.io/greatbody/portly:latest
+    container_name: portly
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - portly-data:/data
+    restart: unless-stopped
+    # Optional: add environment variables or other settings
+    # environment:
+    #   - LOG_LEVEL=info
+
+volumes:
+  portly-data:
+    driver: local
