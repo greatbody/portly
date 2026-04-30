@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andybalholm/brotli"
 	"github.com/greatbody/portly/internal/store"
 )
 
@@ -73,8 +75,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			req.Header.Set("X-Forwarded-Host", req.Header.Get("Host"))
 			req.Header.Set("X-Forwarded-Proto", schemeFromRequest(r))
 			req.Header.Set("X-Forwarded-Prefix", h.MountPrefix)
-			// Strip Accept-Encoding for HTML responses we want to rewrite. Easiest:
-			// keep gzip but decode in ModifyResponse.
+			// Constrain upstream encoding to ones we can decode, otherwise
+			// HTML rewriting in ModifyResponse mangles the body. We support
+			// gzip natively and decode br/deflate as a courtesy in readBody,
+			// but anything else (zstd, ...) would slip through as binary.
+			if ae := req.Header.Get("Accept-Encoding"); ae != "" {
+				req.Header.Set("Accept-Encoding", "gzip")
+			}
 		},
 		ModifyResponse: h.modifyResponse,
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
@@ -181,12 +188,24 @@ func readBody(resp *http.Response) ([]byte, string, error) {
 	case "gzip":
 		gz, err := gzip.NewReader(bytes.NewReader(raw))
 		if err != nil {
-			return raw, enc, nil
+			return raw, "", nil
 		}
 		defer gz.Close()
 		dec, err := io.ReadAll(gz)
 		if err != nil {
-			return raw, enc, nil
+			return raw, "", nil
+		}
+		return dec, enc, nil
+	case "br":
+		dec, err := io.ReadAll(brotli.NewReader(bytes.NewReader(raw)))
+		if err != nil {
+			return raw, "", nil
+		}
+		return dec, enc, nil
+	case "deflate":
+		dec, err := io.ReadAll(flate.NewReader(bytes.NewReader(raw)))
+		if err != nil {
+			return raw, "", nil
 		}
 		return dec, enc, nil
 	default:
